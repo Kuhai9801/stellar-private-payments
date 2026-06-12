@@ -52,12 +52,13 @@ jobs:
             --O2 \
             -l target/witness-graph-builder/circuits-src \
             -o target/witness-runtime-benchmark-o2
+          find target/witness-runtime-benchmark-o2 -maxdepth 3 -type f -print
 
       - name: Run policy witness runtime benchmark
         run: |
           set -o pipefail
-          POLICY_BENCH_R1CS=target/witness-runtime-benchmark-o2/policy_tx_2_2.r1cs \
-          POLICY_BENCH_WASM=target/witness-runtime-benchmark-o2/policy_tx_2_2_js/policy_tx_2_2.wasm \
+          POLICY_BENCH_R1CS="$GITHUB_WORKSPACE/target/witness-runtime-benchmark-o2/policy_tx_2_2.r1cs" \
+          POLICY_BENCH_WASM="$GITHUB_WORKSPACE/target/witness-runtime-benchmark-o2/policy_tx_2_2_js/policy_tx_2_2.wasm" \
           BUILD_TESTS=1 cargo test -p circuits --release policy_witness_runtime_benchmark -- --ignored --nocapture \
             | tee witness-runtime-benchmark.log
 
