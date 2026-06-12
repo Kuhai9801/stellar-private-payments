@@ -16,8 +16,6 @@ use num_bigint::{BigInt, Sign};
 use ruint::aliases::U256;
 // These are part of the reduced STD that is browser compatible
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashSet;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 use std::{collections::HashMap, string::String, vec::Vec};
 #[cfg(target_arch = "wasm32")]
@@ -395,20 +393,20 @@ fn validate_graph_shape(graph: &Graph, expected_witness_size: u32) -> Result<()>
 
 #[cfg(not(target_arch = "wasm32"))]
 fn validate_graph_inputs(inputs: &HashMap<String, Vec<U256>>, graph: &Graph) -> Result<()> {
+    let inputs_size = circom_witness_rs::get_inputs_size(graph);
     let metadata_by_hash: HashMap<u64, &HashSignalInfo> = graph
         .input_mapping
         .iter()
         .filter(|input| !is_placeholder_graph_input(input))
         .map(|input| (input.hash, input))
         .collect();
-    let mut provided_hashes = HashSet::with_capacity(inputs.len());
+    let mut covered_by = vec![None::<String>; inputs_size];
 
     for (name, values) in inputs {
         let input_hash = fnv1a(name);
         let input = metadata_by_hash
             .get(&input_hash)
             .with_context(|| format!("Unknown circuit input `{name}`"))?;
-        provided_hashes.insert(input_hash);
 
         let expected_len = usize::try_from(input.signalsize)
             .context("Witness graph input width does not fit usize")?;
@@ -419,6 +417,26 @@ fn validate_graph_inputs(inputs: &HashMap<String, Vec<U256>>, graph: &Graph) -> 
                 expected_len
             );
         }
+
+        let start = usize::try_from(input.signalid)
+            .context("Witness graph input signal index does not fit usize")?;
+        let end = start
+            .checked_add(expected_len)
+            .ok_or_else(|| anyhow!("Witness graph input range overflows usize"))?;
+        if end > inputs_size {
+            anyhow::bail!(
+                "Input `{name}` maps to range [{start}, {end}) beyond input buffer size {inputs_size}"
+            );
+        }
+
+        for signal_id in start..end {
+            if let Some(previous) = &covered_by[signal_id] {
+                anyhow::bail!(
+                    "Inputs `{previous}` and `{name}` both populate witness graph signal ID {signal_id}"
+                );
+            }
+            covered_by[signal_id] = Some(name.clone());
+        }
     }
 
     for input in &graph.input_mapping {
@@ -426,18 +444,28 @@ fn validate_graph_inputs(inputs: &HashMap<String, Vec<U256>>, graph: &Graph) -> 
             continue;
         }
 
-        if !provided_hashes.contains(&input.hash) {
-            let mut provided_inputs = inputs
-                .keys()
-                .map(|name| format!("{name}:{}", fnv1a(name)))
-                .collect::<Vec<_>>();
-            provided_inputs.sort();
+        let start = usize::try_from(input.signalid)
+            .context("Witness graph input signal index does not fit usize")?;
+        let width = usize::try_from(input.signalsize)
+            .context("Witness graph input width does not fit usize")?;
+        let end = start
+            .checked_add(width)
+            .ok_or_else(|| anyhow!("Witness graph input range overflows usize"))?;
+        if end > inputs_size {
             anyhow::bail!(
-                "Missing circuit input with witness graph hash {} (signal ID {}, width {}; provided input hashes: {})",
+                "Witness graph input range [{start}, {end}) exceeds input buffer size {inputs_size}"
+            );
+        }
+
+        if let Some(missing_signal_id) =
+            (start..end).find(|&signal_id| covered_by[signal_id].is_none())
+        {
+            anyhow::bail!(
+                "Missing circuit input covering witness graph signal ID {} (alias hash {}, alias signal ID {}, width {})",
+                missing_signal_id,
                 input.hash,
                 input.signalid,
-                input.signalsize,
-                provided_inputs.join(", ")
+                input.signalsize
             );
         }
     }
@@ -830,7 +858,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("Missing circuit input with witness graph hash"),
+                .contains("Missing circuit input covering witness graph signal ID"),
             "{err:#}"
         );
     }
@@ -846,6 +874,39 @@ mod tests {
         validate_graph_shape(&graph, 1).expect("placeholder rows must not duplicate real inputs");
         validate_graph_inputs(&inputs, &graph)
             .expect("placeholder rows must not become required inputs");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn graph_inputs_accept_aliases_when_signal_range_is_covered() {
+        let graph = graph_with_alias_inputs();
+        let mut aggregate_input = HashMap::new();
+        aggregate_input.insert("bus".to_string(), vec![U256::from(7), U256::from(8)]);
+        validate_graph_inputs(&aggregate_input, &graph)
+            .expect("aggregate bus alias must cover the full signal range");
+
+        let mut field_inputs = HashMap::new();
+        field_inputs.insert("bus.left".to_string(), vec![U256::from(7)]);
+        field_inputs.insert("bus.right".to_string(), vec![U256::from(8)]);
+        validate_graph_inputs(&field_inputs, &graph)
+            .expect("field aliases must cover the aggregate signal range");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn graph_inputs_reject_partial_alias_coverage_before_zero_filling() {
+        let graph = graph_with_alias_inputs();
+        let mut inputs = HashMap::new();
+        inputs.insert("bus.left".to_string(), vec![U256::from(7)]);
+
+        let err = validate_graph_inputs(&inputs, &graph)
+            .expect_err("partial alias coverage must not leave zero-filled signals");
+
+        assert!(
+            err.to_string()
+                .contains("Missing circuit input covering witness graph signal ID 1"),
+            "{err:#}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -907,6 +968,34 @@ mod tests {
                 signalid: 0,
                 signalsize: 1,
             }],
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn graph_with_alias_inputs() -> Graph {
+        Graph {
+            nodes: vec![
+                circom_witness_rs::graph::Node::Input(0),
+                circom_witness_rs::graph::Node::Input(1),
+            ],
+            signals: vec![0, 1],
+            input_mapping: vec![
+                HashSignalInfo {
+                    hash: fnv1a("bus"),
+                    signalid: 0,
+                    signalsize: 2,
+                },
+                HashSignalInfo {
+                    hash: fnv1a("bus.left"),
+                    signalid: 0,
+                    signalsize: 1,
+                },
+                HashSignalInfo {
+                    hash: fnv1a("bus.right"),
+                    signalid: 1,
+                    signalsize: 1,
+                },
+            ],
         }
     }
 }
