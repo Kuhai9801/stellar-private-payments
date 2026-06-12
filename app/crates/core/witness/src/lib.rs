@@ -363,6 +363,10 @@ fn validate_graph_shape(graph: &Graph, expected_witness_size: u32) -> Result<()>
     let inputs_size = circom_witness_rs::get_inputs_size(graph);
     let mut seen_hashes = HashMap::new();
     for input in &graph.input_mapping {
+        if is_placeholder_graph_input(input) {
+            continue;
+        }
+
         let start = usize::try_from(input.signalid)
             .context("Witness graph input signal index does not fit usize")?;
         let width = usize::try_from(input.signalsize)
@@ -394,6 +398,7 @@ fn validate_graph_inputs(inputs: &HashMap<String, Vec<U256>>, graph: &Graph) -> 
     let metadata_by_hash: HashMap<u64, &HashSignalInfo> = graph
         .input_mapping
         .iter()
+        .filter(|input| !is_placeholder_graph_input(input))
         .map(|input| (input.hash, input))
         .collect();
     let mut provided_hashes = HashSet::with_capacity(inputs.len());
@@ -417,6 +422,10 @@ fn validate_graph_inputs(inputs: &HashMap<String, Vec<U256>>, graph: &Graph) -> 
     }
 
     for input in &graph.input_mapping {
+        if is_placeholder_graph_input(input) {
+            continue;
+        }
+
         if !provided_hashes.contains(&input.hash) {
             anyhow::bail!(
                 "Missing circuit input with witness graph hash {}",
@@ -426,6 +435,11 @@ fn validate_graph_inputs(inputs: &HashMap<String, Vec<U256>>, graph: &Graph) -> 
     }
 
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_placeholder_graph_input(input: &HashSignalInfo) -> bool {
+    input.hash == 0 && input.signalid == 0 && input.signalsize == 0
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -811,6 +825,19 @@ mod tests {
                 .contains("Missing circuit input with witness graph hash"),
             "{err:#}"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn graph_inputs_ignore_zero_hash_placeholder_rows() {
+        let mut graph = graph_with_amount_input();
+        graph.input_mapping.push(HashSignalInfo::default());
+        let mut inputs = HashMap::new();
+        inputs.insert("amount".to_string(), vec![U256::from(7)]);
+
+        validate_graph_shape(&graph, 1).expect("placeholder rows must not duplicate real inputs");
+        validate_graph_inputs(&inputs, &graph)
+            .expect("placeholder rows must not become required inputs");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
