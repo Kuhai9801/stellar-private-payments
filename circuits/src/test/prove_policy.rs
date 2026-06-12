@@ -401,22 +401,101 @@ mod tests {
             .join("../deployments/testnet/circuit_keys/policy_tx_2_2_proving_key.bin")
     }
 
+    fn input_value_to_json(value: &InputValue) -> serde_json::Value {
+        match value {
+            InputValue::Single(value) => serde_json::Value::String(value.to_string()),
+            InputValue::Array(values) => serde_json::Value::Array(
+                values
+                    .iter()
+                    .map(|value| serde_json::Value::String(value.to_string()))
+                    .collect(),
+            ),
+        }
+    }
+
     fn inputs_to_json(inputs: &Inputs) -> Result<String> {
         let mut object = serde_json::Map::new();
         for (key, value) in inputs.iter() {
-            let json_value = match value {
-                InputValue::Single(value) => serde_json::Value::String(value.to_string()),
-                InputValue::Array(values) => serde_json::Value::Array(
-                    values
-                        .iter()
-                        .map(|value| serde_json::Value::String(value.to_string()))
-                        .collect(),
-                ),
-            };
-            object.insert(key.clone(), json_value);
+            object.insert(key.clone(), input_value_to_json(value));
         }
 
         serde_json::to_string(&object).context("failed to serialize policy witness inputs")
+    }
+
+    fn input_values(inputs: &Inputs, key: &str) -> Result<Vec<BigInt>> {
+        let value = inputs
+            .iter()
+            .find_map(|(candidate, value)| (candidate == key).then_some(value))
+            .with_context(|| format!("missing policy input `{key}`"))?;
+
+        Ok(match value {
+            InputValue::Single(value) => vec![value.clone()],
+            InputValue::Array(values) => values.clone(),
+        })
+    }
+
+    fn append_input_values(values: &mut Vec<BigInt>, inputs: &Inputs, key: &str) -> Result<()> {
+        values.extend(input_values(inputs, key)?);
+        Ok(())
+    }
+
+    fn policy_bus_values(
+        inputs: &Inputs,
+        prefix: &str,
+        field_order: &[&str],
+    ) -> Result<Vec<BigInt>> {
+        let n_inputs = input_values(inputs, "inAmount")?.len();
+        let proofs_per_input = match prefix {
+            "membershipProofs" => N_MEM_PROOFS,
+            "nonMembershipProofs" => N_NON_PROOFS,
+            _ => anyhow::bail!("unsupported policy bus `{prefix}`"),
+        };
+        let mut values = Vec::new();
+
+        for input_idx in 0..n_inputs {
+            for proof_idx in 0..proofs_per_input {
+                for field in field_order {
+                    append_input_values(
+                        &mut values,
+                        inputs,
+                        &format!("{prefix}[{input_idx}][{proof_idx}].{field}"),
+                    )?;
+                }
+            }
+        }
+
+        Ok(values)
+    }
+
+    fn inputs_to_graph_json(inputs: &Inputs) -> Result<String> {
+        let mut object = serde_json::Map::new();
+        for (key, value) in inputs.iter() {
+            if key.starts_with("membershipProofs[") || key.starts_with("nonMembershipProofs[") {
+                continue;
+            }
+            object.insert(key.clone(), input_value_to_json(value));
+        }
+
+        // circom-witness-rs hashes Circom bus inputs by the top-level bus name
+        // and expects the bus fields packed in the emitted signal order.
+        object.insert(
+            "membershipProofs".to_string(),
+            input_value_to_json(&InputValue::Array(policy_bus_values(
+                inputs,
+                "membershipProofs",
+                &["leaf", "blinding", "pathElements", "pathIndices"],
+            )?)),
+        );
+        object.insert(
+            "nonMembershipProofs".to_string(),
+            input_value_to_json(&InputValue::Array(policy_bus_values(
+                inputs,
+                "nonMembershipProofs",
+                &["key", "siblings", "oldKey", "oldValue", "isOld0"],
+            )?)),
+        );
+
+        serde_json::to_string(&object).context("failed to serialize graph policy witness inputs")
     }
 
     fn inputs_to_hashmap(inputs: &Inputs) -> HashMap<String, Vec<BigInt>> {
@@ -513,6 +592,7 @@ mod tests {
             .into_inner()
             .ok_or_else(|| anyhow::anyhow!("policy input capture did not run"))?;
         let inputs_json = inputs_to_json(&inputs)?;
+        let graph_inputs_json = inputs_to_graph_json(&inputs)?;
         let wasmer_inputs = inputs_to_hashmap(&inputs);
         let graph_bytes = fs::read(policy_graph_path()).context("failed to read policy graph")?;
         let r1cs_bytes = fs::read(&r1cs).context("failed to read policy R1CS")?;
@@ -531,7 +611,7 @@ mod tests {
         let mut graph_calculator = witness::WitnessCalculator::new(&graph_bytes, &r1cs_bytes)
             .context("failed to initialize native graph witness calculator")?;
         let graph_witness_bytes = graph_calculator
-            .compute_witness(&inputs_json)
+            .compute_witness(&graph_inputs_json)
             .context("native graph witness calculation failed")?;
 
         ensure!(
@@ -539,10 +619,11 @@ mod tests {
             "native graph witness bytes differ from Wasmer witness bytes"
         );
         println!(
-            "BENCH witness_elements={} witness_bytes={} input_json_bytes={}",
+            "BENCH witness_elements={} witness_bytes={} wasmer_input_json_bytes={} graph_input_json_bytes={}",
             wasmer_witness.len(),
             graph_witness_bytes.len(),
-            inputs_json.len()
+            inputs_json.len(),
+            graph_inputs_json.len()
         );
 
         let wasmer_init = time_iterations(INIT_ITERATIONS, || {
@@ -579,7 +660,7 @@ mod tests {
             .context("failed to initialize graph witness calculator")?;
         let graph_compute = time_iterations(COMPUTE_ITERATIONS, || {
             let witness = graph_calculator
-                .compute_witness(&inputs_json)
+                .compute_witness(&graph_inputs_json)
                 .context("native graph witness calculation failed")?;
             black_box(witness.len());
             Ok(())
@@ -606,7 +687,7 @@ mod tests {
             let mut calculator = witness::WitnessCalculator::new(&graph_bytes, &r1cs_bytes)
                 .context("failed to initialize graph witness calculator")?;
             let witness = calculator
-                .compute_witness(&inputs_json)
+                .compute_witness(&graph_inputs_json)
                 .context("native graph witness calculation failed")?;
             black_box(witness.len());
             Ok(())
