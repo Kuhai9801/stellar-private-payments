@@ -19,7 +19,7 @@ mod tests {
         cell::RefCell,
         collections::HashMap,
         convert::TryInto,
-        fs,
+        env, fs,
         hint::black_box,
         panic::{self, AssertUnwindSafe},
         path::PathBuf,
@@ -325,6 +325,19 @@ mod tests {
         load_artifacts("policy_tx_2_2")
     }
 
+    fn benchmark_policy_artifacts() -> Result<(PathBuf, PathBuf)> {
+        match (
+            env::var_os("POLICY_BENCH_WASM"),
+            env::var_os("POLICY_BENCH_R1CS"),
+        ) {
+            (Some(wasm), Some(r1cs)) => Ok((PathBuf::from(wasm), PathBuf::from(r1cs))),
+            (None, None) => policy_artifacts(),
+            _ => Err(anyhow::anyhow!(
+                "POLICY_BENCH_WASM and POLICY_BENCH_R1CS must be set together"
+            )),
+        }
+    }
+
     fn policy_one_in_one_out_case()
     -> Result<(TxCase, Vec<Scalar>, Vec<MembershipTree>, Vec<NonMembership>)> {
         // One real input (in1), one dummy input (in0.amount = 0).
@@ -480,7 +493,7 @@ mod tests {
         const COMPUTE_ITERATIONS: usize = 10;
         const COLD_ITERATIONS: usize = 5;
 
-        let (wasm, r1cs) = policy_artifacts()?;
+        let (wasm, r1cs) = benchmark_policy_artifacts()?;
         let (case, leaves, membership_trees, keys) = policy_one_in_one_out_case()?;
         let captured_inputs = RefCell::new(None);
         run_case(

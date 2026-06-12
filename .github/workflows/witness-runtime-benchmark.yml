@@ -42,9 +42,22 @@ jobs:
       - name: Generate matching policy witness graph
         run: tools/witness-graph/generate-policy-graph.sh
 
+      - name: Generate matching O2 Circom benchmark artifacts
+        run: |
+          set -eux
+          mkdir -p target/witness-runtime-benchmark-o2
+          circom target/witness-graph-builder/circuits-src/policy_tx_2_2.circom \
+            --r1cs \
+            --wasm \
+            --O2 \
+            -l target/witness-graph-builder/circuits-src \
+            -o target/witness-runtime-benchmark-o2
+
       - name: Run policy witness runtime benchmark
         run: |
           set -o pipefail
+          POLICY_BENCH_R1CS=target/witness-runtime-benchmark-o2/policy_tx_2_2.r1cs \
+          POLICY_BENCH_WASM=target/witness-runtime-benchmark-o2/policy_tx_2_2_js/policy_tx_2_2.wasm \
           BUILD_TESTS=1 cargo test -p circuits --release policy_witness_runtime_benchmark -- --ignored --nocapture \
             | tee witness-runtime-benchmark.log
 
