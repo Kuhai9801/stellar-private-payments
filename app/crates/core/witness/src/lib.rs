@@ -427,9 +427,17 @@ fn validate_graph_inputs(inputs: &HashMap<String, Vec<U256>>, graph: &Graph) -> 
         }
 
         if !provided_hashes.contains(&input.hash) {
+            let mut provided_inputs = inputs
+                .keys()
+                .map(|name| format!("{name}:{}", fnv1a(name)))
+                .collect::<Vec<_>>();
+            provided_inputs.sort();
             anyhow::bail!(
-                "Missing circuit input with witness graph hash {}",
-                input.hash
+                "Missing circuit input with witness graph hash {} (signal ID {}, width {}; provided input hashes: {})",
+                input.hash,
+                input.signalid,
+                input.signalsize,
+                provided_inputs.join(", ")
             );
         }
     }

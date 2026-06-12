@@ -49,6 +49,7 @@ jobs:
           circom target/witness-graph-builder/circuits-src/policy_tx_2_2.circom \
             --r1cs \
             --wasm \
+            --sym \
             --O2 \
             -l target/witness-graph-builder/circuits-src \
             -o target/witness-runtime-benchmark-o2
@@ -67,5 +68,7 @@ jobs:
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
           name: witness-runtime-benchmark-log
-          path: witness-runtime-benchmark.log
+          path: |
+            witness-runtime-benchmark.log
+            target/witness-runtime-benchmark-o2/policy_tx_2_2.sym
           retention-days: 7
