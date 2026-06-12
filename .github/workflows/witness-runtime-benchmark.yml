@@ -37,7 +37,7 @@ jobs:
           lscpu
 
       - name: Install Circom compiler
-        run: cargo install --git https://github.com/iden3/circom --tag v2.2.3 --package circom --locked
+        run: cargo install --git https://github.com/iden3/circom --tag v2.2.3 --locked circom
 
       - name: Generate matching policy witness graph
         run: tools/witness-graph/generate-policy-graph.sh
