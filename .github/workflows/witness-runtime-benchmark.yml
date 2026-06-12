@@ -36,6 +36,12 @@ jobs:
           uname -a
           lscpu
 
+      - name: Install Circom compiler
+        run: cargo install --git https://github.com/iden3/circom --tag v2.2.3 --package circom --locked
+
+      - name: Generate matching policy witness graph
+        run: tools/witness-graph/generate-policy-graph.sh
+
       - name: Run policy witness runtime benchmark
         run: |
           set -o pipefail
@@ -43,6 +49,7 @@ jobs:
             | tee witness-runtime-benchmark.log
 
       - name: Upload benchmark log
+        if: always()
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
         with:
           name: witness-runtime-benchmark-log
