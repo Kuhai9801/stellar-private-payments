@@ -31,7 +31,6 @@ use compiler::{
 use constraint_generation::{BuildConfig, build_circuit};
 use constraint_writers::ConstraintExporter;
 use program_structure::error_definition::Report;
-use regex::Regex;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::BTreeMap,
@@ -41,6 +40,9 @@ use std::{
     string::ToString,
 };
 use type_analysis::check_types::check_types;
+
+mod build_support;
+use build_support::extract_circom_dependencies;
 
 const CURVE_ID: &str = "bn128";
 
@@ -639,103 +641,6 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Recursively extract all .circom file dependencies by parsing all include
-/// statements
-///
-/// # Arguments
-///
-/// * `main_file` - Circom file from where include dependencies will be parsed.
-/// * `base_dir` - Base directory to look for other Circom dependencies
-fn extract_circom_dependencies(main_file: &Path, base_dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut dependencies = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut to_process = vec![main_file.to_path_buf()];
-
-    // Precompute search directories for non-relative includes
-    let search_dirs = vec![
-        base_dir.to_path_buf(),
-        base_dir.join("src"),
-        base_dir.join("node_modules"),
-    ];
-
-    // Regex for Circom includes
-    let include_pattern = Regex::new(r#"^\s*include\s+["']([^"']+)["']"#)?;
-
-    while let Some(current_file) = to_process.pop() {
-        if !visited.insert(current_file.clone()) {
-            continue;
-        }
-
-        let content = fs::read_to_string(&current_file)?;
-
-        for cap in include_pattern.captures_iter(&content) {
-            let include_path = cap
-                .get(1)
-                .expect("No string matching the regex was found")
-                .as_str();
-
-            let resolved_path = resolve_include_path(
-                include_path,
-                current_file.parent().expect("No parent directory found"),
-                &search_dirs,
-            )?;
-
-            if let Some(path) = resolved_path {
-                dependencies.push(path.clone());
-                to_process.push(path);
-            }
-        }
-    }
-
-    Ok(dependencies)
-}
-
-/// Resolve an include path to an absolute file path
-///
-/// Handles both relative paths (starting with `./` or `../`) and library paths
-/// by searching in the provided search directories.
-///
-/// # Arguments
-///
-/// * `include_path` - The include path string from the Circom file
-/// * `current_dir` - Directory of the file containing the include statement
-/// * `search_dirs` - List of directories to search for non-relative includes
-///
-/// # Returns
-///
-/// Returns `Ok(Some(PathBuf))` if the path is found and resolved, `Ok(None)` if
-/// not found, or an error if file system operations fail.
-fn resolve_include_path(
-    include_path: &str,
-    current_dir: &Path,
-    search_dirs: &[PathBuf],
-) -> Result<Option<PathBuf>> {
-    // Relative paths
-    if include_path.starts_with("./") || include_path.starts_with("../") {
-        let path = current_dir.join(include_path);
-        if path.exists() {
-            return Ok(Some(path.canonicalize()?));
-        }
-    } else {
-        let path = current_dir.join(include_path);
-        if path.exists() {
-            return Ok(Some(path.canonicalize()?));
-        }
-
-        // Search in library directories
-        for dir in search_dirs {
-            let path = dir.join(include_path);
-            if path.exists() {
-                return Ok(Some(path.canonicalize()?));
-            }
-        }
-    }
-
-    // Not found
-    eprintln!("Warning: Could not resolve include: {include_path}");
-    Ok(None)
 }
 
 /// Check if any dependency file is newer than the build artifacts

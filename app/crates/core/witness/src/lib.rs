@@ -1,8 +1,8 @@
 //! Circom witness generation.
 //!
-//! Browser and native builds use a pre-generated `circom-witness-rs` graph
-//! while preserving the JSON input format and witness byte layout consumed by
-//! the prover.
+//! Browser and native builds use a pre-generated `circom-witness-rs` graph for
+//! witness calculation while preserving the JSON input format and witness byte
+//! layout consumed by the prover.
 
 use anyhow::{Context as _, Result, anyhow};
 use ark_ff_05::{AdditiveGroup as _, BigInteger as _, Field as _, PrimeField as _};
@@ -28,8 +28,8 @@ pub struct WitnessCalculator {
     backend: WitnessBackend,
     /// Number of variables in the witness
     witness_size: u32,
-    /// Number of public inputs (does not include public outputs or the constant
-    /// signal 1)
+    /// Number of R1CS public inputs (does not include public outputs or the
+    /// constant signal 1).
     num_public_inputs: u32,
 }
 
@@ -47,8 +47,8 @@ impl WitnessCalculator {
     /// Create a witness calculator from a serialized witness graph and
     /// matching R1CS bytes.
     ///
-    /// The graph supplies the execution plan; the R1CS supplies the witness and
-    /// public-input sizing expected by the prover.
+    /// The graph supplies the execution plan; the R1CS supplies witness sizing
+    /// and public-input metadata for compatibility with the existing API.
     pub fn from_graph(graph_bytes: &[u8], r1cs_bytes: &[u8]) -> Result<Self> {
         let circuit_shape = parse_circuit_shape(r1cs_bytes)?;
         let graph = circom_witness_rs::init_graph(graph_bytes)
@@ -96,7 +96,11 @@ impl WitnessCalculator {
         self.witness_size
     }
 
-    /// Get the number of public inputs
+    /// Get the R1CS public input count.
+    ///
+    /// This excludes public outputs and the constant signal. The prover's
+    /// verification input vector uses the R1CS total public count
+    /// (outputs + inputs).
     pub fn num_public_inputs(&self) -> u32 {
         self.num_public_inputs
     }
@@ -385,11 +389,15 @@ fn graph_black_box_functions() -> HashMap<String, circom_witness_rs::BlackBoxFun
     let mut bbfs: HashMap<String, circom_witness_rs::BlackBoxFunction> = HashMap::new();
     bbfs.insert(
         "bbf_inv".to_string(),
-        Arc::new(|args| args[0].inverse().unwrap_or(ark_bn254_05::Fr::ZERO)),
+        Arc::new(|args| {
+            expect_black_box_arity("bbf_inv", args, 1);
+            args[0].inverse().unwrap_or(ark_bn254_05::Fr::ZERO)
+        }),
     );
     bbfs.insert(
         "bbf_bit".to_string(),
         Arc::new(|args| {
+            expect_black_box_arity("bbf_bit", args, 2);
             let value = fr_to_u256(args[0]);
             let bit = fr_to_u256(args[1]).try_into().unwrap_or(usize::MAX);
             if bit < 256 && value.bit(bit) {
@@ -400,6 +408,15 @@ fn graph_black_box_functions() -> HashMap<String, circom_witness_rs::BlackBoxFun
         }),
     );
     bbfs
+}
+
+fn expect_black_box_arity(name: &str, args: &[ark_bn254_05::Fr], expected: usize) {
+    assert_eq!(
+        args.len(),
+        expected,
+        "{name} expects {expected} argument(s), got {}",
+        args.len()
+    );
 }
 
 fn fr_to_u256(value: ark_bn254_05::Fr) -> U256 {
@@ -423,11 +440,26 @@ fn compute_graph_witness_bytes(
             Some(&graph_black_box_functions()),
         )
     }))
-    .map_err(|_| anyhow!("Witness graph calculation panicked after input validation"))?
+    .map_err(|panic| {
+        anyhow!(
+            "Witness graph calculation panicked after input validation: {}",
+            panic_payload_message(panic)
+        )
+    })?
     .map_err(|e| anyhow!("Witness graph calculation failed: {e}"))?;
     ensure_witness_len(&witness, witness_size)?;
 
     Ok(witness_u256_to_bytes(&witness))
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic payload".to_string()
 }
 
 /// Check if a JSON value is an array containing only primitives.
@@ -785,6 +817,24 @@ mod tests {
             err.to_string()
                 .contains("field element is outside the BN254 scalar field"),
             "{err:#}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn graph_black_box_functions_reject_wrong_arity_with_context() {
+        let bbfs = graph_black_box_functions();
+        let bbf_bit = bbfs.get("bbf_bit").expect("bbf_bit registered");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bbf_bit(&[ark_bn254_05::Fr::from(1u64)]);
+        }))
+        .expect_err("wrong BBF arity must panic with a clear message");
+        let message = panic_payload_message(panic);
+
+        assert!(
+            message.contains("bbf_bit expects 2 argument(s), got 1"),
+            "{message}"
         );
     }
 

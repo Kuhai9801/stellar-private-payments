@@ -33,8 +33,10 @@ use core::ops::AddAssign;
 
 /// QAP reduction used by snarkjs/Circom proving keys.
 ///
-/// This mirrors the small `CircomReduction` adapter from `circom-compat`
-/// without importing the rest of that crate and its Wasmer witness runtime.
+/// This is a local copy of the small `CircomReduction` adapter from
+/// `circom-compat`, kept here so proof generation stays compatible with
+/// Circom/snarkjs proving keys without importing that crate's Wasmer witness
+/// runtime.
 struct CircomReduction;
 
 impl R1CSToQAP for CircomReduction {

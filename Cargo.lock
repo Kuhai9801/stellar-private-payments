@@ -1157,7 +1157,6 @@ dependencies = [
  "parser",
  "program_structure",
  "prover",
- "regex",
  "serde_json",
  "sha2 0.11.0",
  "type_analysis",

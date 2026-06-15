@@ -1,6 +1,8 @@
 //! Merkle tree utilities for proof generation
 //!
 //! Provides merkle tree operations matching the Circom circuit implementations.
+//! This code lives in the prover crate so browser/runtime builds do not depend
+//! on the circuits crate's build-script and test-only dependency stack.
 
 use alloc::vec::Vec;
 use core::ops::Add;
