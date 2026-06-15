@@ -11,7 +11,7 @@ use num_bigint::{BigInt, Sign};
 use ruint::aliases::U256;
 // These are part of the reduced STD that is browser compatible
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     string::String,
     sync::Arc,
     vec::Vec,
@@ -438,7 +438,8 @@ fn compute_graph_witness_bytes(
     graph: &Graph,
     witness_size: u32,
 ) -> Result<Vec<u8>> {
-    let witness_inputs = inputs_hashmap_to_u256(inputs_hashmap)?;
+    let mut witness_inputs = inputs_hashmap_to_u256(inputs_hashmap)?;
+    coalesce_policy_bus_inputs(&mut witness_inputs, graph)?;
     validate_graph_inputs(&witness_inputs, graph)?;
     let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         circom_witness_rs::calculate_witness(
@@ -457,6 +458,85 @@ fn compute_graph_witness_bytes(
     ensure_witness_len(&witness, witness_size)?;
 
     Ok(witness_u256_to_bytes(&witness))
+}
+
+fn coalesce_policy_bus_inputs(
+    inputs: &mut HashMap<String, Vec<U256>>,
+    graph: &Graph,
+) -> Result<()> {
+    coalesce_bus_input(
+        inputs,
+        graph,
+        "membershipProofs",
+        &["leaf", "blinding", "pathElements", "pathIndices"],
+    )?;
+    coalesce_bus_input(
+        inputs,
+        graph,
+        "nonMembershipProofs",
+        &["key", "siblings", "oldKey", "oldValue", "isOld0"],
+    )
+}
+
+fn coalesce_bus_input(
+    inputs: &mut HashMap<String, Vec<U256>>,
+    graph: &Graph,
+    bus_name: &str,
+    field_order: &[&str],
+) -> Result<()> {
+    if inputs.contains_key(bus_name) || !graph_has_input(graph, bus_name) {
+        return Ok(());
+    }
+
+    let mut by_index: BTreeMap<(usize, usize), HashMap<String, Vec<U256>>> = BTreeMap::new();
+    for (key, value) in inputs.iter() {
+        if let Some((first, second, field)) = parse_bus_field_key(key, bus_name) {
+            by_index
+                .entry((first, second))
+                .or_default()
+                .insert(field.to_string(), value.clone());
+        }
+    }
+
+    if by_index.is_empty() {
+        return Ok(());
+    }
+
+    let mut coalesced = Vec::new();
+    for ((first, second), fields) in by_index {
+        for field in field_order {
+            let values = fields.get(*field).with_context(|| {
+                format!("Missing `{bus_name}[{first}][{second}].{field}` for grouped bus input")
+            })?;
+            coalesced.extend(values.iter().copied());
+        }
+    }
+
+    inputs.insert(bus_name.to_string(), coalesced);
+    Ok(())
+}
+
+fn graph_has_input(graph: &Graph, name: &str) -> bool {
+    let hash = fnv1a(name);
+    graph.input_mapping.iter().any(|input| input.hash == hash)
+}
+
+fn parse_bus_field_key<'a>(key: &'a str, bus_name: &str) -> Option<(usize, usize, &'a str)> {
+    let rest = key.strip_prefix(bus_name)?;
+    let (first, rest) = parse_bracket_index(rest)?;
+    let (second, rest) = parse_bracket_index(rest)?;
+    let field = rest.strip_prefix('.')?;
+    if field.is_empty() || field.contains('.') || field.contains('[') {
+        return None;
+    }
+    Some((first, second, field))
+}
+
+fn parse_bracket_index(input: &str) -> Option<(usize, &str)> {
+    let input = input.strip_prefix('[')?;
+    let end = input.find(']')?;
+    let index = input[..end].parse().ok()?;
+    Some((index, &input[end + 1..]))
 }
 
 fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -794,6 +874,105 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Missing circuit input with witness graph hash"),
+            "{err:#}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn policy_bus_inputs_are_coalesced_when_graph_requires_grouped_bus() {
+        let graph = Graph {
+            nodes: vec![circom_witness_rs::graph::Node::Input(0)],
+            signals: vec![0],
+            input_mapping: vec![
+                HashSignalInfo {
+                    hash: fnv1a("nonMembershipProofs"),
+                    signalid: 0,
+                    signalsize: 14,
+                },
+                HashSignalInfo {
+                    hash: fnv1a("nonMembershipProofs[0][0].key"),
+                    signalid: 0,
+                    signalsize: 1,
+                },
+                HashSignalInfo {
+                    hash: fnv1a("nonMembershipProofs[0][0].siblings"),
+                    signalid: 1,
+                    signalsize: 10,
+                },
+                HashSignalInfo {
+                    hash: fnv1a("nonMembershipProofs[0][0].oldKey"),
+                    signalid: 11,
+                    signalsize: 1,
+                },
+                HashSignalInfo {
+                    hash: fnv1a("nonMembershipProofs[0][0].oldValue"),
+                    signalid: 12,
+                    signalsize: 1,
+                },
+                HashSignalInfo {
+                    hash: fnv1a("nonMembershipProofs[0][0].isOld0"),
+                    signalid: 13,
+                    signalsize: 1,
+                },
+            ],
+        };
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "nonMembershipProofs[0][0].siblings".to_string(),
+            (2u64..12).map(U256::from).collect(),
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].oldValue".to_string(),
+            vec![U256::from(13)],
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].key".to_string(),
+            vec![U256::from(1)],
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].isOld0".to_string(),
+            vec![U256::from(14)],
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].oldKey".to_string(),
+            vec![U256::from(12)],
+        );
+
+        coalesce_policy_bus_inputs(&mut inputs, &graph).expect("bus coalescing should succeed");
+
+        assert_eq!(
+            inputs.get("nonMembershipProofs").expect("grouped bus"),
+            &(1u64..=14).map(U256::from).collect::<Vec<_>>()
+        );
+        validate_graph_inputs(&inputs, &graph)
+            .expect("coalesced grouped bus should satisfy graph validation");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn policy_bus_coalescing_reports_missing_fields() {
+        let graph = Graph {
+            nodes: vec![circom_witness_rs::graph::Node::Input(0)],
+            signals: vec![0],
+            input_mapping: vec![HashSignalInfo {
+                hash: fnv1a("membershipProofs"),
+                signalid: 0,
+                signalsize: 13,
+            }],
+        };
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "membershipProofs[0][0].leaf".to_string(),
+            vec![U256::from(1)],
+        );
+
+        let err = coalesce_policy_bus_inputs(&mut inputs, &graph)
+            .expect_err("incomplete grouped bus input must fail clearly");
+
+        assert!(
+            err.to_string()
+                .contains("Missing `membershipProofs[0][0].blinding`"),
             "{err:#}"
         );
     }
