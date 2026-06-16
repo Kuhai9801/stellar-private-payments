@@ -891,6 +891,7 @@ fn sum_note_amounts_outputs(outputs: &[TransactOutput]) -> Result<NoteAmount> {
 mod tests {
     use super::*;
     use crate::types::InputValue;
+    use types::U256;
 
     fn zero_membership(tree_depth: usize) -> AspMembershipProof {
         AspMembershipProof {
@@ -911,6 +912,10 @@ mod tests {
             siblings: vec![Field::ZERO; smt_depth],
             root: Field::ZERO,
         }
+    }
+
+    fn field(n: u128) -> Field {
+        Field::try_from_u256(U256::from(n)).expect("test field")
     }
 
     #[test]
@@ -970,6 +975,84 @@ mod tests {
         // Encrypted outputs should be present for both slots.
         assert!(artifacts.ext_data.encrypted_output0.len() >= 112);
         assert!(artifacts.ext_data.encrypted_output1.len() >= 112);
+    }
+
+    #[test]
+    fn deposit_accepts_truncated_nonmembership_proof_shape_for_circuit_inputs() {
+        let tree_depth: u32 = 10;
+        let smt_depth: u32 = 10;
+        let tree_depth_usize = usize::try_from(tree_depth).expect("tree_depth");
+        let smt_depth_usize = usize::try_from(smt_depth).expect("smt_depth");
+        let asp_root = field(9);
+        let truncated_proof = AspNonMembershipProof {
+            key: field(1),
+            old_key: field(2),
+            old_value: field(3),
+            is_old0: false,
+            siblings: (10u128..20).map(field).collect(),
+            root: asp_root,
+        };
+
+        let artifacts = deposit(
+            DepositParams {
+                priv_key: NotePrivateKey([1u8; 32]),
+                encryption_pubkey: EncryptionPublicKey([2u8; 32]),
+                pool_root: field(4),
+                pool_address: "POOL".into(),
+                amount: ExtAmount::from(10),
+                outputs: vec![TransactOutput {
+                    amount: NoteAmount::from(10),
+                    blinding: field(5),
+                    recipient_note_pubkey: None,
+                    recipient_encryption_pubkey: None,
+                }],
+                membership_proof: zero_membership(tree_depth_usize),
+                non_membership_proof: truncated_proof.clone(),
+                tree_depth,
+                smt_depth,
+            },
+            |_| Ok([0u8; 32]),
+        )
+        .expect("deposit builder accepts ten-sibling non-membership proof");
+
+        assert_eq!(artifacts.prepared.asp_non_membership_root, asp_root);
+
+        let roots = artifacts
+            .circuit_inputs
+            .signals
+            .get("nonMembershipRoots")
+            .expect("nonMembershipRoots");
+        let InputValue::Array(roots) = roots else {
+            panic!("nonMembershipRoots should be an array");
+        };
+        assert_eq!(roots.len(), N_INPUTS);
+        assert!(
+            roots
+                .iter()
+                .all(|root| root == &field_to_circuit_hex(&asp_root).unwrap())
+        );
+
+        for slot in 0..N_INPUTS {
+            let key = format!("nonMembershipProofs[{}][0].siblings", slot);
+            let siblings = artifacts
+                .circuit_inputs
+                .signals
+                .get(&key)
+                .expect("nonMembershipProof siblings");
+            let InputValue::Array(siblings) = siblings else {
+                panic!("nonMembershipProof siblings should be an array");
+            };
+            assert_eq!(siblings.len(), smt_depth_usize);
+            assert_eq!(
+                siblings,
+                &truncated_proof
+                    .siblings
+                    .iter()
+                    .map(field_to_circuit_hex)
+                    .collect::<Result<Vec<_>>>()
+                    .unwrap()
+            );
+        }
     }
 
     #[test]

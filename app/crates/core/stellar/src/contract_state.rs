@@ -434,6 +434,20 @@ impl StateFetcher {
             ));
         }
 
+        Self::build_nonmembership_proof_from_find_result(
+            key,
+            non_membership_root,
+            smt_depth,
+            parsed,
+        )
+    }
+
+    fn build_nonmembership_proof_from_find_result(
+        key: Field,
+        non_membership_root: Field,
+        smt_depth: usize,
+        parsed: ParsedFindResult,
+    ) -> Result<AspNonMembershipProof> {
         // Pad/trim siblings to circuit SMT depth.
         let mut siblings = parsed.siblings;
         if siblings.len() < smt_depth {
@@ -655,5 +669,39 @@ impl StateFetcher {
         Ok(xdr::ScAddress::Contract(xdr::ContractId(xdr::Hash(
             contract.0,
         ))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(n: u128) -> Field {
+        Field::try_from_u256(U256::from(n)).expect("test field")
+    }
+
+    #[test]
+    fn state_fetcher_preprocessing_truncates_over_depth_nonmembership_proof() {
+        let key = field(2049);
+        let root = field(99);
+        let full_siblings = (0u128..11).map(field).collect::<Vec<_>>();
+        let parsed = ParsedFindResult {
+            found: false,
+            siblings: full_siblings.clone(),
+            not_found_key: field(1),
+            not_found_value: field(1),
+            is_old0: false,
+        };
+
+        let proof = StateFetcher::build_nonmembership_proof_from_find_result(key, root, 10, parsed)
+            .expect("proof object is built");
+
+        assert_eq!(proof.root, root);
+        assert_eq!(proof.key, key);
+        assert_eq!(proof.old_key, field(1));
+        assert_eq!(proof.old_value, field(1));
+        assert!(!proof.is_old0);
+        assert_eq!(proof.siblings.len(), 10);
+        assert_eq!(proof.siblings, full_siblings[..10]);
     }
 }

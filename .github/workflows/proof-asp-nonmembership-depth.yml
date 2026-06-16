@@ -1,0 +1,37 @@
+name: ASP non-membership depth proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "proof/asp-nonmembership-depth*"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  proof:
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2
+      - name: Run focused ASP non-membership contract regression
+        run: cargo test -p asp-non-membership valid_full_depth_nonmembership_proof_is_broken_by_ten_level_truncation -- --nocapture
+      - name: Run StateFetcher non-membership preprocessing regression
+        run: cargo test -p stellar state_fetcher_preprocessing_truncates_over_depth_nonmembership_proof -- --nocapture
+      - name: Run prover transaction input regression
+        run: cargo test -p prover deposit_accepts_truncated_nonmembership_proof_shape_for_circuit_inputs -- --nocapture
+      - name: Run policy transaction proof rejection regression
+        run: cargo test -p circuits policy_tx_rejects_app_truncated_valid_current_asp_state -- --ignored --nocapture

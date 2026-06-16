@@ -786,6 +786,129 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn policy_tx_rejects_app_truncated_valid_current_asp_state() -> Result<()> {
+        let (wasm, r1cs) = policy_artifacts()?;
+
+        let shared_priv_key = Scalar::from(707u64);
+        let shared_pub_key = derive_public_key(shared_priv_key);
+
+        // App deposit flow duplicates one ASP non-membership proof across both
+        // input slots, and both slots derive the same public key from the
+        // transaction private key.
+        let case = TxCase::new(
+            vec![
+                InputNote {
+                    leaf_index: 0,
+                    priv_key: shared_priv_key,
+                    blinding: Scalar::from(21u64),
+                    amount: Scalar::from(0u64),
+                },
+                InputNote {
+                    leaf_index: 5,
+                    priv_key: shared_priv_key,
+                    blinding: Scalar::from(22u64),
+                    amount: Scalar::from(0u64),
+                },
+            ],
+            vec![
+                OutputNote {
+                    pub_key: Scalar::from(101u64),
+                    blinding: Scalar::from(201u64),
+                    amount: Scalar::from(7u64),
+                },
+                OutputNote {
+                    pub_key: Scalar::from(102u64),
+                    blinding: Scalar::from(202u64),
+                    amount: Scalar::from(5u64),
+                },
+            ],
+        );
+
+        let deposit = Scalar::from(12u64);
+        let leaves = prepopulated_leaves(
+            LEVELS,
+            0xD3AD_0517u64,
+            &[case.inputs[0].leaf_index, case.inputs[1].leaf_index],
+            24,
+        );
+        let membership_trees = default_membership_trees(&case, 0x5555_AAAAu64);
+        let keys = vec![
+            NonMembership {
+                key_non_inclusion: scalar_to_bigint(shared_pub_key),
+            },
+            NonMembership {
+                key_non_inclusion: scalar_to_bigint(shared_pub_key),
+            },
+        ];
+
+        run_case(
+            &wasm,
+            &r1cs,
+            &case,
+            leaves.clone(),
+            deposit,
+            &membership_trees,
+            &keys,
+            None::<fn(&mut Inputs)>,
+        )?;
+
+        let res = run_case_with_non_membership_builder(
+            &wasm,
+            &r1cs,
+            &case,
+            leaves,
+            deposit,
+            &membership_trees,
+            &keys,
+            |key, _pubs| {
+                let step = BigInt::from(1u32) << LEVELS;
+                let candidates = [(1u32, 2u32), (1, 3), (2, 3), (3, 5), (5, 8)];
+
+                for (left, right) in candidates {
+                    let overrides = vec![
+                        (
+                            key + (&step * BigInt::from(left)),
+                            BigInt::from(10_001u32 + left),
+                        ),
+                        (
+                            key + (&step * BigInt::from(right)),
+                            BigInt::from(10_001u32 + right),
+                        ),
+                    ];
+                    let mut proof = prepare_smt_proof_with_overrides(key, &overrides, 0);
+                    if !proof.found && proof.siblings.len() > LEVELS {
+                        let full_len = proof.siblings.len();
+                        proof.siblings.truncate(LEVELS);
+                        assert_eq!(
+                            proof.siblings.len(),
+                            LEVELS,
+                            "app artifact should have policy circuit SMT depth"
+                        );
+                        println!(
+                            "valid ASP non-membership proof required {full_len} siblings; app artifact kept {LEVELS}"
+                        );
+                        return proof;
+                    }
+                }
+
+                panic!("failed to construct over-depth ASP non-membership proof for policy key");
+            },
+            None::<fn(&mut Inputs)>,
+        );
+
+        assert!(
+            res.is_err(),
+            "policy transaction unexpectedly proved with app-truncated ASP non-membership proof"
+        );
+        if let Err(e) = res {
+            println!("policy transaction rejected app-truncated ASP proof: {e:?}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
     fn test_tx_only_spends_notes_withdraw_one_real() -> Result<()> {
         let (wasm, r1cs) = policy_artifacts()?;
 

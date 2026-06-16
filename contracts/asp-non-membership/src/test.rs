@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{Address, Bytes, Env, U256, testutils::Address as _};
+use soroban_sdk::{Address, Bytes, Env, U256, Vec, testutils::Address as _};
 
 /// Create a test environment that disables snapshot writing under Miri.
 /// Miri's isolation mode blocks filesystem operations, which the Soroban SDK
@@ -483,6 +483,58 @@ fn test_verify_non_membership_single_leaf_collision() {
     assert!(
         result,
         "Non-membership should be verified for collision case"
+    );
+}
+
+#[test]
+fn valid_full_depth_nonmembership_proof_is_broken_by_ten_level_truncation() {
+    let env = test_env();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(ASPNonMembership, (admin,));
+    let client = ASPNonMembershipClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    let key0 = U256::from_u32(&env, 1u32);
+    let key1 = U256::from_u32(&env, 1u32 + (1u32 << 10));
+    let query = U256::from_u32(&env, 1u32 + (1u32 << 11));
+
+    client.insert_leaf(&key0, &key0);
+    client.insert_leaf(&key1, &key1);
+
+    let proof = client.find_key(&query);
+    assert!(!proof.found, "query key should not be in the tree");
+    assert_eq!(
+        proof.siblings.len(),
+        11,
+        "the ASP tree can return a proof deeper than policy_tx_2_2's 10 SMT levels"
+    );
+    assert!(
+        client.verify_non_membership(
+            &query,
+            &proof.siblings,
+            &proof.not_found_key,
+            &proof.not_found_value,
+        ),
+        "full on-chain proof should verify against the current ASP root"
+    );
+
+    let mut truncated = Vec::new(&env);
+    for i in 0..10 {
+        truncated.push_back(proof.siblings.get(i).unwrap());
+    }
+
+    assert!(
+        matches!(
+            client.try_verify_non_membership(
+                &query,
+                &truncated,
+                &proof.not_found_key,
+                &proof.not_found_value,
+            ),
+            Err(Ok(Error::InvalidProof))
+        ),
+        "ten-level truncation should not verify against the same ASP root"
     );
 }
 
