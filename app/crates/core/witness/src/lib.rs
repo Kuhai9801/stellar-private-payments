@@ -493,13 +493,15 @@ fn coalesce_bus_input(
     bus_name: &str,
     field_order: &[&str],
 ) -> Result<()> {
-    if inputs.contains_key(bus_name) || !graph_has_input(graph, bus_name) {
+    if !graph_has_input(graph, bus_name) {
         return Ok(());
     }
 
     let mut by_index: BTreeMap<(usize, usize), HashMap<String, Vec<U256>>> = BTreeMap::new();
+    let mut consumed_keys = Vec::new();
     for (key, value) in inputs.iter() {
         if let Some((first, second, field)) = parse_bus_field_key(key, bus_name) {
+            consumed_keys.push(key.clone());
             by_index
                 .entry((first, second))
                 .or_default()
@@ -521,7 +523,19 @@ fn coalesce_bus_input(
         }
     }
 
-    inputs.insert(bus_name.to_string(), coalesced);
+    if let Some(grouped) = inputs.get(bus_name) {
+        if grouped != &coalesced {
+            anyhow::bail!(
+                "Conflicting grouped and expanded inputs for `{bus_name}` encode different values"
+            );
+        }
+    } else {
+        inputs.insert(bus_name.to_string(), coalesced);
+    }
+
+    for key in consumed_keys {
+        inputs.remove(&key);
+    }
     Ok(())
 }
 
@@ -893,6 +907,36 @@ mod tests {
         let graph = Graph {
             nodes: vec![circom_witness_rs::graph::Node::Input(0)],
             signals: vec![0],
+            input_mapping: vec![HashSignalInfo {
+                hash: fnv1a("nonMembershipProofs"),
+                signalid: 0,
+                signalsize: 14,
+            }],
+        };
+        let mut inputs = non_membership_flattened_inputs();
+
+        coalesce_policy_bus_inputs(&mut inputs, &graph).expect("bus coalescing should succeed");
+
+        assert_eq!(
+            inputs.get("nonMembershipProofs").expect("grouped bus"),
+            &(1u64..=14).map(U256::from).collect::<Vec<_>>()
+        );
+        assert!(
+            !inputs
+                .keys()
+                .any(|key| key.starts_with("nonMembershipProofs[0][0].")),
+            "expanded bus aliases must not remain after grouped canonicalization"
+        );
+        validate_graph_inputs(&inputs, &graph)
+            .expect("coalesced grouped bus should satisfy graph validation");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn policy_bus_coalescing_rejects_conflicting_grouped_and_flattened_inputs() {
+        let graph = Graph {
+            nodes: vec![circom_witness_rs::graph::Node::Input(0)],
+            signals: vec![0],
             input_mapping: vec![
                 HashSignalInfo {
                     hash: fnv1a("nonMembershipProofs"),
@@ -904,58 +948,75 @@ mod tests {
                     signalid: 0,
                     signalsize: 1,
                 },
+            ],
+        };
+        let mut inputs = non_membership_flattened_inputs();
+        inputs.insert(
+            "nonMembershipProofs".to_string(),
+            (100u64..114).map(U256::from).collect(),
+        );
+
+        let err = coalesce_policy_bus_inputs(&mut inputs, &graph)
+            .expect_err("conflicting grouped and flattened bus values must fail");
+
+        assert!(
+            err.to_string()
+                .contains("Conflicting grouped and expanded inputs for `nonMembershipProofs`"),
+            "{err:#}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn policy_bus_inputs_coalesce_membership_and_non_membership() {
+        let graph = Graph {
+            nodes: vec![circom_witness_rs::graph::Node::Input(0)],
+            signals: vec![0],
+            input_mapping: vec![
                 HashSignalInfo {
-                    hash: fnv1a("nonMembershipProofs[0][0].siblings"),
-                    signalid: 1,
-                    signalsize: 10,
+                    hash: fnv1a("membershipProofs"),
+                    signalid: 0,
+                    signalsize: 13,
                 },
                 HashSignalInfo {
-                    hash: fnv1a("nonMembershipProofs[0][0].oldKey"),
-                    signalid: 11,
-                    signalsize: 1,
-                },
-                HashSignalInfo {
-                    hash: fnv1a("nonMembershipProofs[0][0].oldValue"),
-                    signalid: 12,
-                    signalsize: 1,
-                },
-                HashSignalInfo {
-                    hash: fnv1a("nonMembershipProofs[0][0].isOld0"),
+                    hash: fnv1a("nonMembershipProofs"),
                     signalid: 13,
-                    signalsize: 1,
+                    signalsize: 14,
                 },
             ],
         };
-        let mut inputs = HashMap::new();
+        let mut inputs = non_membership_flattened_inputs();
         inputs.insert(
-            "nonMembershipProofs[0][0].siblings".to_string(),
-            (2u64..12).map(U256::from).collect(),
+            "membershipProofs[0][0].pathElements".to_string(),
+            (17u64..27).map(U256::from).collect(),
         );
         inputs.insert(
-            "nonMembershipProofs[0][0].oldValue".to_string(),
-            vec![U256::from(13)],
+            "membershipProofs[0][0].leaf".to_string(),
+            vec![U256::from(15)],
         );
         inputs.insert(
-            "nonMembershipProofs[0][0].key".to_string(),
-            vec![U256::from(1)],
+            "membershipProofs[0][0].pathIndices".to_string(),
+            vec![U256::from(27)],
         );
         inputs.insert(
-            "nonMembershipProofs[0][0].isOld0".to_string(),
-            vec![U256::from(14)],
-        );
-        inputs.insert(
-            "nonMembershipProofs[0][0].oldKey".to_string(),
-            vec![U256::from(12)],
+            "membershipProofs[0][0].blinding".to_string(),
+            vec![U256::from(16)],
         );
 
         coalesce_policy_bus_inputs(&mut inputs, &graph).expect("bus coalescing should succeed");
 
         assert_eq!(
-            inputs.get("nonMembershipProofs").expect("grouped bus"),
+            inputs.get("membershipProofs").expect("membership bus"),
+            &(15u64..=27).map(U256::from).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            inputs
+                .get("nonMembershipProofs")
+                .expect("non-membership bus"),
             &(1u64..=14).map(U256::from).collect::<Vec<_>>()
         );
         validate_graph_inputs(&inputs, &graph)
-            .expect("coalesced grouped bus should satisfy graph validation");
+            .expect("both coalesced buses should satisfy graph validation");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -984,6 +1045,32 @@ mod tests {
                 .contains("Missing `membershipProofs[0][0].blinding`"),
             "{err:#}"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn non_membership_flattened_inputs() -> HashMap<String, Vec<U256>> {
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "nonMembershipProofs[0][0].siblings".to_string(),
+            (2u64..12).map(U256::from).collect(),
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].oldValue".to_string(),
+            vec![U256::from(13)],
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].key".to_string(),
+            vec![U256::from(1)],
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].isOld0".to_string(),
+            vec![U256::from(14)],
+        );
+        inputs.insert(
+            "nonMembershipProofs[0][0].oldKey".to_string(),
+            vec![U256::from(12)],
+        );
+        inputs
     }
 
     #[cfg(not(target_arch = "wasm32"))]

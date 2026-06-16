@@ -11,6 +11,7 @@ patched_witness_rs_dir="$work_dir/vendor/circom-witness-rs"
 circomlib_dir="$graph_src_dir/circomlib"
 comparators_file="$circomlib_dir/circuits/comparators.circom"
 bitify_file="$circomlib_dir/circuits/bitify.circom"
+expected_circom_version="2.2.3"
 
 mkdir -p "$work_dir/src" "$graph_src_dir" "$(dirname -- "$out_file")"
 rm -rf "$graph_src_dir"
@@ -93,12 +94,22 @@ if ! command -v circom >/dev/null 2>&1; then
     exit 1
 fi
 
+circom_version=$(circom --version | awk '{print $NF}')
+if [ "$circom_version" != "$expected_circom_version" ]; then
+    echo "circom $expected_circom_version is required to generate the witness graph (found $circom_version)" >&2
+    exit 1
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 is required to generate the witness graph manifest" >&2
     exit 1
 fi
 
 prepare_patched_witness_builder
+(
+    cd "$work_dir"
+    cargo generate-lockfile
+)
 
 locked_rev=$(tr -d '\r\n' < "$repo_root/circuits/circomlib.lock")
 
@@ -116,7 +127,7 @@ git -C "$circomlib_dir" remote add origin https://github.com/iden3/circomlib.git
 git -C "$circomlib_dir" fetch --depth 1 origin "$locked_rev"
 git -C "$circomlib_dir" checkout --detach FETCH_HEAD
 
-python3 - "$repo_root" "$graph_src_dir" "$manifest_work_file" "$out_file" <<'PY'
+python3 - "$repo_root" "$graph_src_dir" "$manifest_work_file" "$out_file" "$circom_version" "$work_dir/Cargo.lock" <<'PY'
 import hashlib
 import os
 import re
@@ -127,6 +138,8 @@ repo_root = Path(sys.argv[1]).resolve()
 graph_src_dir = Path(sys.argv[2]).resolve()
 manifest_file = Path(sys.argv[3]).resolve()
 out_file = Path(sys.argv[4]).resolve()
+circom_version = sys.argv[5]
+builder_lock = Path(sys.argv[6]).resolve()
 entry = graph_src_dir / "policy_tx_2_2.circom"
 include_re = re.compile(r'^\s*include\s+["\']([^"\']+)["\']')
 search_dirs = [graph_src_dir]
@@ -161,6 +174,7 @@ sources = sorted(
     deps
     + [
         repo_root / "circuits/circomlib.lock",
+        repo_root / "circuits/build.rs",
         repo_root / "tools/witness-graph/generate-policy-graph.sh",
     ],
     key=lambda path: str(path),
@@ -179,6 +193,8 @@ manifest_file.parent.mkdir(parents=True, exist_ok=True)
 with manifest_file.open("w", encoding="utf-8") as manifest:
     manifest.write("version 1\n")
     manifest.write(f"graph_sha256 {sha256(out_file) if out_file.exists() else 'pending'}\n")
+    manifest.write(f"circom_version {circom_version}\n")
+    manifest.write(f"builder_lock_sha256 {sha256(builder_lock)}\n")
     for source in sources:
         manifest.write(f"source_sha256 {sha256(source)} {repo_rel(source)}\n")
 PY

@@ -45,6 +45,9 @@ mod build_support;
 use build_support::extract_circom_dependencies;
 
 const CURVE_ID: &str = "bn128";
+const EXPECTED_GRAPH_CIRCOM_VERSION: &str = "2.2.3";
+const EXPECTED_GRAPH_BUILDER_LOCK_SHA256: &str =
+    "e5405413f79ac57b0d92952c1dd8f737e609e9a2e93ac950466d8a9ae5c30d67";
 
 /// Circom stems whose Groth16 artifacts live under `testdata/`
 /// (`{stem}_proving_key.bin`, etc.). Append here when wiring a new entry-point
@@ -202,6 +205,22 @@ fn verify_graph_manifest(
         );
     }
 
+    if manifest.circom_version != EXPECTED_GRAPH_CIRCOM_VERSION {
+        bail!(
+            "Native witness graph manifest for {circuit_name} was generated with circom {}, expected {}. Run `tools/witness-graph/generate-policy-graph.sh` with the expected circom version.",
+            manifest.circom_version,
+            EXPECTED_GRAPH_CIRCOM_VERSION
+        );
+    }
+
+    if manifest.builder_lock_sha256 != EXPECTED_GRAPH_BUILDER_LOCK_SHA256 {
+        bail!(
+            "Native witness graph manifest for {circuit_name} has graph builder lock hash {}, expected {}. Run `tools/witness-graph/generate-policy-graph.sh` with the expected graph builder dependencies.",
+            manifest.builder_lock_sha256,
+            EXPECTED_GRAPH_BUILDER_LOCK_SHA256
+        );
+    }
+
     let expected_sources = graph_manifest_sources(workspace_root, circom_file, dependencies)?;
     if manifest.source_sha256 != expected_sources {
         let (missing, stale, extra) =
@@ -216,6 +235,8 @@ fn verify_graph_manifest(
 
 struct GraphManifest {
     graph_sha256: String,
+    circom_version: String,
+    builder_lock_sha256: String,
     source_sha256: BTreeMap<String, String>,
 }
 
@@ -224,6 +245,8 @@ fn parse_graph_manifest(manifest_path: &Path) -> Result<GraphManifest> {
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
     let mut version_seen = false;
     let mut graph_sha256 = None;
+    let mut circom_version = None;
+    let mut builder_lock_sha256 = None;
     let mut source_sha256 = BTreeMap::new();
 
     for (line_no, line) in contents.lines().enumerate() {
@@ -242,6 +265,16 @@ fn parse_graph_manifest(manifest_path: &Path) -> Result<GraphManifest> {
 
         if let Some(hash) = trimmed.strip_prefix("graph_sha256 ") {
             graph_sha256 = Some(hash.trim().to_string());
+            continue;
+        }
+
+        if let Some(version) = trimmed.strip_prefix("circom_version ") {
+            circom_version = Some(version.trim().to_string());
+            continue;
+        }
+
+        if let Some(hash) = trimmed.strip_prefix("builder_lock_sha256 ") {
+            builder_lock_sha256 = Some(hash.trim().to_string());
             continue;
         }
 
@@ -270,6 +303,18 @@ fn parse_graph_manifest(manifest_path: &Path) -> Result<GraphManifest> {
                 manifest_path.display()
             )
         })?,
+        circom_version: circom_version.ok_or_else(|| {
+            anyhow!(
+                "Graph manifest {} is missing circom_version",
+                manifest_path.display()
+            )
+        })?,
+        builder_lock_sha256: builder_lock_sha256.ok_or_else(|| {
+            anyhow!(
+                "Graph manifest {} is missing builder_lock_sha256",
+                manifest_path.display()
+            )
+        })?,
         source_sha256,
     })
 }
@@ -283,6 +328,7 @@ fn graph_manifest_sources(
         .chain(dependencies.iter().cloned())
         .chain([
             workspace_root.join("circuits/circomlib.lock"),
+            workspace_root.join("circuits/build.rs"),
             workspace_root.join("tools/witness-graph/generate-policy-graph.sh"),
         ])
         .collect();
