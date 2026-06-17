@@ -391,8 +391,9 @@ impl StateFetcher {
     ///
     /// - if `non_membership_root == 0`, returns a dummy "empty tree" proof
     ///   padded to `smt_depth`
-    /// - otherwise calls `asp_non_membership.find_key(key)` and pads/trims
-    ///   siblings to `smt_depth`
+    /// - otherwise calls `asp_non_membership.find_key(key)`, pads shorter
+    ///   sibling paths to `smt_depth`, and rejects paths deeper than the
+    ///   circuit can verify
     pub async fn get_nonmembership_proof(
         &self,
         note_pubkey: &NotePublicKey,
@@ -434,14 +435,7 @@ impl StateFetcher {
             ));
         }
 
-        // Pad/trim siblings to circuit SMT depth.
-        let mut siblings = parsed.siblings;
-        if siblings.len() < smt_depth {
-            let padding = smt_depth.saturating_sub(siblings.len());
-            siblings.extend(core::iter::repeat_n(Field::ZERO, padding));
-        } else if siblings.len() > smt_depth {
-            siblings.truncate(smt_depth);
-        }
+        let siblings = fit_non_membership_siblings(parsed.siblings, smt_depth)?;
 
         Ok(AspNonMembershipProof {
             key,
@@ -655,5 +649,57 @@ impl StateFetcher {
         Ok(xdr::ScAddress::Contract(xdr::ContractId(xdr::Hash(
             contract.0,
         ))))
+    }
+}
+
+fn fit_non_membership_siblings(mut siblings: Vec<Field>, smt_depth: usize) -> Result<Vec<Field>> {
+    if siblings.len() > smt_depth {
+        return Err(anyhow!(
+            "ASP non-membership proof has {} sibling(s), but the policy circuit supports {}",
+            siblings.len(),
+            smt_depth
+        ));
+    }
+
+    let padding = smt_depth.saturating_sub(siblings.len());
+    siblings.extend(core::iter::repeat_n(Field::ZERO, padding));
+    Ok(siblings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(v: u64) -> Field {
+        Field(U256::from(v))
+    }
+
+    #[test]
+    fn non_membership_siblings_are_padded_to_smt_depth() {
+        let siblings =
+            fit_non_membership_siblings(vec![field(1), field(2)], 4).expect("padding succeeds");
+
+        assert_eq!(siblings, vec![field(1), field(2), Field::ZERO, Field::ZERO]);
+    }
+
+    #[test]
+    fn non_membership_siblings_keep_exact_smt_depth() {
+        let siblings =
+            fit_non_membership_siblings(vec![field(1), field(2)], 2).expect("exact depth succeeds");
+
+        assert_eq!(siblings, vec![field(1), field(2)]);
+    }
+
+    #[test]
+    fn non_membership_siblings_reject_over_depth_proof() {
+        let err = fit_non_membership_siblings(vec![field(1), field(2), field(3)], 2)
+            .expect_err("over-depth proofs must not be truncated");
+
+        assert!(
+            err.to_string().contains(
+                "ASP non-membership proof has 3 sibling(s), but the policy circuit supports 2"
+            ),
+            "{err:#}"
+        );
     }
 }
