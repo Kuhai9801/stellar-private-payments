@@ -15,3 +15,4 @@ USER 65532:65532
 EXPOSE 443
 
 ENTRYPOINT ["/usr/local/bin/bootnode"]
+

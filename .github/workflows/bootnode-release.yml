@@ -90,3 +90,4 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}/bootnode:${{ github.ref_name }}
             ghcr.io/${{ github.repository }}/bootnode:latest
+

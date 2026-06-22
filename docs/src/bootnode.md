@@ -58,3 +58,4 @@ Non-exhaustive list of things a malicious or compromised bootnode could do:
 - The bootnode restricts the JSON-RPC surface area (only `getEvents`, `getLatestLedger`) and rejects all other methods.
 - The service is intended to be **HTTPS-only** in production and includes basic security headers and IP rate limiting.
 - Users who need stronger trust guarantees should self-host a bootnode and/or cross-check history using multiple RPC providers.
+

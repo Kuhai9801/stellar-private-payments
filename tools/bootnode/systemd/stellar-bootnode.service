@@ -19,3 +19,4 @@ ReadWritePaths=/var/lib/stellar-bootnode
 
 [Install]
 WantedBy=multi-user.target
+

@@ -213,7 +213,7 @@ export const Templates = {
             badge.textContent = 'Unspent';
             badge.classList.add('bg-emerald-500/20', 'text-emerald-400');
         }
-
+        
         // Disclose link — opens the standalone disclosure page pre-filled with
         // this note's commitment. Only present for unspent notes.
         const discloseBtn = row.querySelector('.disclose-btn');
