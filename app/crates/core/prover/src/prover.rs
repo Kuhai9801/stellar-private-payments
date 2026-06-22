@@ -2,8 +2,7 @@
 //!
 //! Handles loading proving keys and generating ZK proofs from witness data.
 //!
-//! We cannot use ark_circom directly because it depends on
-//! wasmer which doesn't work in browser WASM. Instead, we:
+//! We avoid `ark-circom` here because it depends on Wasmer. Instead, we:
 //! 1. Load the proving key
 //! 2. Parse the R1CS file to get constraint matrices (see r1cs.rs)
 //! 3. Accept pre-computed witness bytes from the JS witness calculator
@@ -17,9 +16,12 @@ use crate::{
 use alloc::vec::Vec;
 use anyhow::{Result, anyhow};
 use ark_bn254::{Bn254, Fr, G1Affine, G2Affine};
-use ark_circom::CircomReduction;
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
-use ark_groth16::{PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey};
+use ark_groth16::{
+    PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey,
+    r1cs_to_qap::{LibsnarkReduction, R1CSToQAP, evaluate_constraint},
+};
+use ark_poly::EvaluationDomain;
 use ark_relations::{
     gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable},
     lc,
@@ -28,6 +30,117 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 use ark_std::rand::rngs::OsRng;
 use core::ops::AddAssign;
+
+/// QAP reduction used by snarkjs/Circom proving keys.
+///
+/// This is a local copy of the small `CircomReduction` adapter from
+/// `circom-compat`, kept here so proof generation stays compatible with
+/// Circom/snarkjs proving keys without importing that crate's Wasmer witness
+/// runtime.
+struct CircomReduction;
+
+#[allow(clippy::arithmetic_side_effects)]
+impl R1CSToQAP for CircomReduction {
+    #[allow(clippy::type_complexity)]
+    fn instance_map_with_evaluation<F: PrimeField, D: EvaluationDomain<F>>(
+        cs: ConstraintSystemRef<F>,
+        t: &F,
+    ) -> Result<(Vec<F>, Vec<F>, Vec<F>, F, usize, usize), SynthesisError> {
+        LibsnarkReduction::instance_map_with_evaluation::<F, D>(cs, t)
+    }
+
+    fn witness_map_from_matrices<F: PrimeField, D: EvaluationDomain<F>>(
+        matrices: &[Vec<Vec<(F, usize)>>],
+        num_inputs: usize,
+        num_constraints: usize,
+        full_assignment: &[F],
+    ) -> Result<Vec<F>, SynthesisError> {
+        let domain_len = num_constraints
+            .checked_add(num_inputs)
+            .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain = D::new(domain_len).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain_size = domain.size();
+
+        let mut a = ark_std::vec![F::ZERO; domain_size];
+        let mut b = ark_std::vec![F::ZERO; domain_size];
+
+        for (((a_i, b_i), at_i), bt_i) in a[..num_constraints]
+            .iter_mut()
+            .zip(&mut b[..num_constraints])
+            .zip(&matrices[0])
+            .zip(&matrices[1])
+        {
+            *a_i = evaluate_constraint(at_i, full_assignment);
+            *b_i = evaluate_constraint(bt_i, full_assignment);
+        }
+
+        {
+            let start = num_constraints;
+            let end = start
+                .checked_add(num_inputs)
+                .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+            a[start..end].clone_from_slice(&full_assignment[..num_inputs]);
+        }
+
+        let mut c = ark_std::vec![F::ZERO; domain_size];
+        for ((c_i, &a_i), &b_i) in c[..num_constraints].iter_mut().zip(&a).zip(&b) {
+            *c_i = a_i * b_i;
+        }
+
+        domain.ifft_in_place(&mut a);
+        domain.ifft_in_place(&mut b);
+
+        let double_domain_size = domain_size
+            .checked_mul(2)
+            .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain_double =
+            D::new(double_domain_size).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let root_of_unity = domain_double.element(1);
+
+        D::distribute_powers_and_mul_by_const(&mut a, root_of_unity, F::ONE);
+        D::distribute_powers_and_mul_by_const(&mut b, root_of_unity, F::ONE);
+
+        domain.fft_in_place(&mut a);
+        domain.fft_in_place(&mut b);
+
+        let mut ab = domain.mul_polynomials_in_evaluation_domain(&a, &b);
+        drop(a);
+        drop(b);
+
+        domain.ifft_in_place(&mut c);
+        D::distribute_powers_and_mul_by_const(&mut c, root_of_unity, F::ONE);
+        domain.fft_in_place(&mut c);
+
+        for (ab_i, c_i) in ab.iter_mut().zip(c) {
+            *ab_i -= &c_i;
+        }
+
+        Ok(ab)
+    }
+
+    fn h_query_scalars<F: PrimeField, D: EvaluationDomain<F>>(
+        max_power: usize,
+        t: F,
+        _: F,
+        delta_inverse: F,
+    ) -> Result<Vec<F>, SynthesisError> {
+        let scalars_len = max_power
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let mut scalars = (0..scalars_len)
+            .map(|i| {
+                let power =
+                    u64::try_from(i).map_err(|_| SynthesisError::PolynomialDegreeTooLarge)?;
+                Ok(delta_inverse * t.pow([power]))
+            })
+            .collect::<Result<Vec<_>, SynthesisError>>()?;
+        let domain = D::new(scalars.len()).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+
+        domain.ifft_in_place(&mut scalars);
+        Ok(scalars.into_iter().skip(1).step_by(2).collect())
+    }
+}
 
 // Soroban-compatible encoding helpers.
 // Soroban's BN254 G2 uses c1||c0 (imaginary||real) ordering, while arkworks
@@ -80,6 +193,38 @@ fn proof_to_uncompressed_bytes(proof: &Proof<Bn254>) -> Vec<u8> {
     out.extend_from_slice(&g2_bytes_uncompressed(&proof.b));
     out.extend_from_slice(&g1_bytes_uncompressed(&proof.c));
     out
+}
+
+fn verify_proof_with_processed_vk(
+    pvk: &PreparedVerifyingKey<Bn254>,
+    expected_inputs: usize,
+    proof: &Proof<Bn254>,
+    public_inputs_bytes: &[u8],
+) -> Result<bool> {
+    if !public_inputs_bytes.len().is_multiple_of(FIELD_SIZE) {
+        return Err(anyhow!("Invalid public inputs size"));
+    }
+
+    let num_inputs = public_inputs_bytes.len() / FIELD_SIZE;
+    if num_inputs != expected_inputs {
+        return Err(anyhow!(
+            "Public input count mismatch: got {}, expected {}",
+            num_inputs,
+            expected_inputs
+        ));
+    }
+
+    let mut public_inputs = Vec::with_capacity(num_inputs);
+    for chunk in public_inputs_bytes.chunks_exact(FIELD_SIZE) {
+        public_inputs.push(bytes_to_fr(chunk)?);
+    }
+
+    <ark_groth16::Groth16<Bn254, CircomReduction> as SNARK<Fr>>::verify_with_processed_vk(
+        pvk,
+        &public_inputs,
+        proof,
+    )
+    .map_err(|e| anyhow!("Verification error: {}", e))
 }
 
 /// A circuit that replays R1CS constraints with pre-computed witness
@@ -433,16 +578,8 @@ impl Prover {
 
     /// Verify a proof (for testing purposes)
     pub fn verify(&self, proof_bytes: &[u8], public_inputs_bytes: &[u8]) -> Result<bool> {
-        // Deserialize proof
         let proof = Proof::<Bn254>::deserialize_compressed(proof_bytes)
             .map_err(|e| anyhow!("Failed to load proof: {}", e))?;
-
-        // Parse public inputs
-        if !public_inputs_bytes.len().is_multiple_of(FIELD_SIZE) {
-            return Err(anyhow!("Invalid public inputs size"));
-        }
-
-        let num_inputs = public_inputs_bytes.len() / FIELD_SIZE;
         let expected_inputs = self
             .pk
             .vk
@@ -450,30 +587,7 @@ impl Prover {
             .len()
             .checked_sub(1)
             .ok_or_else(|| anyhow!("Invalid verifying key"))?;
-
-        if num_inputs != expected_inputs {
-            return Err(anyhow!(
-                "Public input count mismatch: got {}, expected {}",
-                num_inputs,
-                expected_inputs
-            ));
-        }
-
-        let mut public_inputs = Vec::with_capacity(num_inputs);
-        for chunk in public_inputs_bytes.chunks_exact(FIELD_SIZE) {
-            public_inputs.push(bytes_to_fr(chunk)?);
-        }
-
-        // Verify
-        let result =
-            <ark_groth16::Groth16<Bn254, CircomReduction> as SNARK<Fr>>::verify_with_processed_vk(
-                &self.pvk,
-                &public_inputs,
-                &proof,
-            )
-            .map_err(|e| anyhow!("Verification error: {}", e))?;
-
-        Ok(result)
+        verify_proof_with_processed_vk(&self.pvk, expected_inputs, &proof, public_inputs_bytes)
     }
 }
 
@@ -497,33 +611,14 @@ pub fn verify_proof(
     let vk = VerifyingKey::<Bn254>::deserialize_compressed(vk_bytes)
         .map_err(|e| anyhow!("Failed to load VK: {}", e))?;
 
-    // Process VK
     let pvk = <ark_groth16::Groth16<Bn254, CircomReduction> as SNARK<Fr>>::process_vk(&vk)
         .map_err(|e| anyhow!("Failed to process VK: {}", e))?;
-
-    // Deserialize proof
     let proof = Proof::<Bn254>::deserialize_compressed(proof_bytes)
         .map_err(|e| anyhow!("Failed to load proof: {}", e))?;
-
-    // Parse public inputs
-    if !public_inputs_bytes.len().is_multiple_of(FIELD_SIZE) {
-        return Err(anyhow!("Invalid public inputs size"));
-    }
-
-    let num_inputs = public_inputs_bytes.len() / FIELD_SIZE;
-    let mut public_inputs = Vec::with_capacity(num_inputs);
-    for chunk in public_inputs_bytes.chunks_exact(FIELD_SIZE) {
-        public_inputs.push(bytes_to_fr(chunk)?);
-    }
-
-    // Verify
-    let result =
-        <ark_groth16::Groth16<Bn254, CircomReduction> as SNARK<Fr>>::verify_with_processed_vk(
-            &pvk,
-            &public_inputs,
-            &proof,
-        )
-        .map_err(|e| anyhow!("Verification error: {}", e))?;
-
-    Ok(result)
+    let expected_inputs = vk
+        .gamma_abc_g1
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("Invalid verifying key"))?;
+    verify_proof_with_processed_vk(&pvk, expected_inputs, &proof, public_inputs_bytes)
 }

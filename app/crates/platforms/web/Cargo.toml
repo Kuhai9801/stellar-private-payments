@@ -22,6 +22,7 @@ path = "src/bin/prover_worker.rs"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 console_error_panic_hook = { workspace = true }
+disclosure = { workspace = true }
 futures = { workspace = true }
 gloo-timers = { workspace = true, features = ["futures"] }
 gloo-worker = { version = "0.6", default-features = false, features = ["futures"] }
@@ -34,6 +35,7 @@ serde_json = { workspace = true, features = ["alloc"] }
 sha2 = { workspace = true }
 state = { workspace = true }
 stellar = { workspace = true }
+tx-planner = { workspace = true }
 types = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { version = "0.4", default-features = false }
@@ -47,6 +49,10 @@ sqlite-wasm-vfs = { version = "0.2.0", default-features = false }
 
 [build-dependencies]
 sha2 = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+wiremock = "0.6"
 
 [lints]
 workspace = true
